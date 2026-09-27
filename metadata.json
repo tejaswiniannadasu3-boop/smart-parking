@@ -1,0 +1,10 @@
+{
+  "name": "SmartPark - Intelligent 3D Parking Management System",
+  "description": "Intelligent 3D mall parking management system with real-time slot tracking, ADSA Min-Heap allocation, Python occupancy forecasting, DBMS/ER modeling, voice assistant, and digital ticketing.",
+  "requestFramePermissions": [
+    "microphone"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
