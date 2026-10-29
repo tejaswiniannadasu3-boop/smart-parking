@@ -63,6 +63,8 @@ export interface User {
 
 export type BookingStatus = 'CONFIRMED' | 'ACTIVE' | 'COMPLETED' | 'CANCELLED';
 
+export type AppLanguage = 'en' | 'te' | 'hi' | 'ta' | 'kn';
+
 export interface Booking {
   id: string;
   bookingRef: string;
@@ -76,11 +78,26 @@ export interface Booking {
   entryGate: string;
   startTime: string;
   endTime?: string;
+  durationHours?: number;
   status: BookingStatus;
   hourlyRate: number;
   totalAmount?: number;
   qrCodeData: string;
   paymentStatus: 'PAID' | 'PENDING';
+  // Intelligent Overstay / Dynamic Extension fields
+  scheduledEndTime?: string;
+  overstayMinutes?: number;
+  gracePeriodExpiresAt?: string;
+  autoExtendedMinutes?: number;
+  overstayCharge?: number;
+  isOverstaying?: boolean;
+  isInGracePeriod?: boolean;
+  reroutedAlternativeSlot?: string;
+  smartAutoExtendEnabled?: boolean;
+  autoExtensionCount?: number;
+  maxAutoExtensions?: number;
+  penaltyApplied?: boolean;
+  penaltyAmount?: number;
 }
 
 export interface OccupancyForecast {
@@ -141,4 +158,41 @@ export interface NavigationStep {
   distanceMeters: number;
   direction: 'STRAIGHT' | 'RIGHT' | 'LEFT' | 'ARRIVED';
   landmark: string;
+}
+
+export interface IndianMallGate {
+  name: string;
+  code: string;
+  roadName: string;
+  description: string;
+}
+
+export interface IndianMall {
+  id: string;
+  name: string;
+  brand: string;
+  city: string;
+  state: string;
+  region: 'North' | 'South' | 'West' | 'East' | 'Central';
+  grossAreaSqFt: number; // in sq ft
+  floors: number;
+  storesCount: number;
+  parkingCapacity: number;
+  evChargingBays: number;
+  hourlyParkingRateINR: number;
+  address: string;
+  pinCode: string;
+  metroConnectivity?: string;
+  rating: number;
+  rankByArea?: number;
+  keyAnchors: string[];
+  features: string[];
+  zonesDescription: {
+    zoneA: string;
+    zoneB: string;
+    zoneC: string;
+    zoneD: string;
+  };
+  entryGates: IndianMallGate[];
+  popularFor: string;
 }

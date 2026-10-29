@@ -6,6 +6,7 @@ import {
   Vehicle,
   DMGTQueryPreset,
   ParkingHistoryItem,
+  IndianMall,
 } from '../types';
 
 export class DbmsEngine {
@@ -276,6 +277,7 @@ export class DbmsEngine {
     vehicleModel: string;
     slotId: string;
     entryGate: string;
+    durationHours?: number;
   }): {
     success: boolean;
     booking?: Booking;
@@ -323,6 +325,11 @@ export class DbmsEngine {
     slot.currentVehicleModel = params.vehicleModel;
 
     const bookingRef = `SPK-${Date.now().toString().slice(-6)}`;
+    const duration = params.durationHours || 2;
+    const nowMs = Date.now();
+    const scheduledEnd = new Date(nowMs + duration * 3600 * 1000).toISOString();
+    const graceEnd = new Date(nowMs + (duration * 60 + 15) * 60 * 1000).toISOString();
+
     const newBooking: Booking = {
       id: `bkg-${Date.now()}`,
       bookingRef,
@@ -335,6 +342,19 @@ export class DbmsEngine {
       zoneCode: slot.zoneCode,
       entryGate: params.entryGate,
       startTime: new Date().toISOString(),
+      durationHours: duration,
+      scheduledEndTime: scheduledEnd,
+      gracePeriodExpiresAt: graceEnd,
+      overstayMinutes: 0,
+      autoExtendedMinutes: 0,
+      overstayCharge: 0,
+      isOverstaying: false,
+      isInGracePeriod: false,
+      smartAutoExtendEnabled: true,
+      autoExtensionCount: 0,
+      maxAutoExtensions: 3,
+      penaltyApplied: false,
+      penaltyAmount: 0,
       status: 'CONFIRMED',
       hourlyRate: slot.hourlyRate,
       qrCodeData: `SMARTPARK:${bookingRef}:${slot.slotNumber}:${params.vehiclePlate}`,
@@ -344,10 +364,407 @@ export class DbmsEngine {
     this.bookings.unshift(newBooking);
     this.logAudit(
       'SLOT_ALLOCATED',
-      `Booking ${bookingRef} created for Vehicle ${params.vehiclePlate} at Slot ${slot.slotNumber}.`
+      `Booking ${bookingRef} created for Vehicle ${params.vehiclePlate} at Slot ${slot.slotNumber}. Scheduled duration: ${duration}h (Until ${new Date(scheduledEnd).toLocaleTimeString()}). Smart Auto-Extend: ENABLED.`
     );
 
     return { success: true, booking: newBooking };
+  }
+
+  // ==========================================
+  // INTELLIGENT OVERSTAY & DYNAMIC EXTENSION
+  // ==========================================
+
+  public toggleSmartAutoExtend(bookingId: string, enabled: boolean): { success: boolean; enabled: boolean; booking?: Booking } {
+    const booking = this.bookings.find((b) => b.id === bookingId);
+    if (!booking) return { success: false, enabled: false };
+    booking.smartAutoExtendEnabled = enabled;
+    this.logAudit(
+      'SMART_AUTO_EXTEND_TOGGLED',
+      `Smart Auto-Extend set to ${enabled ? 'ENABLED' : 'DISABLED'} for Booking ${booking.bookingRef}.`
+    );
+    return { success: true, enabled, booking };
+  }
+
+  public executeSmartAutoExtendBlock(bookingId: string): {
+    success: boolean;
+    autoExtensionCount: number;
+    maxReached: boolean;
+    addedMinutes: number;
+    newScheduledEndTime?: string;
+    message: string;
+    reroutedSlot?: string;
+    booking?: Booking;
+  } {
+    const booking = this.bookings.find((b) => b.id === bookingId);
+    if (!booking) {
+      return { success: false, autoExtensionCount: 0, maxReached: false, addedMinutes: 0, message: 'Booking not found' };
+    }
+
+    const currentCount = booking.autoExtensionCount || 0;
+    const max = booking.maxAutoExtensions || 3;
+
+    if (currentCount >= max) {
+      booking.penaltyApplied = true;
+      booking.penaltyAmount = 50; // Standard overstay penalty after 3 auto extensions
+      this.logAudit(
+        'OVERSTAY_PENALTY_APPLIED',
+        `Booking ${booking.bookingRef} reached maximum 3 auto-extensions (90 mins). Penalty of ₹50 applied.`
+      );
+      return {
+        success: false,
+        autoExtensionCount: currentCount,
+        maxReached: true,
+        addedMinutes: 0,
+        message: `Maximum 3 auto-extensions reached (${max * 30} mins). Overstay penalty of ₹50 applies.`,
+        booking,
+      };
+    }
+
+    // Add 30-minute block
+    const newCount = currentCount + 1;
+    const currentEndMs = booking.scheduledEndTime
+      ? new Date(booking.scheduledEndTime).getTime()
+      : Date.now();
+    const baseMs = Math.max(currentEndMs, Date.now());
+    const newEndMs = baseMs + 30 * 60 * 1000;
+    const newGraceMs = newEndMs + 15 * 60 * 1000;
+
+    booking.scheduledEndTime = new Date(newEndMs).toISOString();
+    booking.gracePeriodExpiresAt = new Date(newGraceMs).toISOString();
+    booking.autoExtensionCount = newCount;
+    booking.autoExtendedMinutes = (booking.autoExtendedMinutes || 0) + 30;
+    booking.isOverstaying = false;
+    booking.isInGracePeriod = false;
+    booking.overstayMinutes = 0;
+    // Standard pro-rata charge for 30 mins
+    const blockCharge = Math.round(booking.hourlyRate * 0.5);
+    booking.overstayCharge = (booking.overstayCharge || 0) + blockCharge;
+
+    // Check conflict shield
+    const conflictingBooking = this.bookings.find(
+      (b) =>
+        b.id !== booking.id &&
+        b.slotId === booking.slotId &&
+        (b.status === 'CONFIRMED' || b.status === 'ACTIVE')
+    );
+
+    let reroutedSlot: string | undefined = undefined;
+    if (conflictingBooking) {
+      const alternativeSlot =
+        this.slots.find(
+          (s) => s.id !== booking.slotId && s.zoneCode === booking.zoneCode && s.status === 'AVAILABLE'
+        ) || this.slots.find((s) => s.status === 'AVAILABLE');
+
+      if (alternativeSlot) {
+        conflictingBooking.slotId = alternativeSlot.id;
+        conflictingBooking.slotNumber = alternativeSlot.slotNumber;
+        conflictingBooking.zoneCode = alternativeSlot.zoneCode;
+        alternativeSlot.status = 'RESERVED';
+        alternativeSlot.currentVehiclePlate = conflictingBooking.vehiclePlate;
+        reroutedSlot = alternativeSlot.slotNumber;
+        booking.reroutedAlternativeSlot = alternativeSlot.slotNumber;
+
+        this.logAudit(
+          'CONFLICT_DYNAMICALLY_RESOLVED',
+          `ADSA Min-Heap automatically rerouted conflicting incoming booking ${conflictingBooking.bookingRef} to alternative Bay ${alternativeSlot.slotNumber}.`
+        );
+      }
+    }
+
+    const formattedNewTime = new Date(newEndMs).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+    this.logAudit(
+      'SMART_AUTO_EXTEND_APPLIED',
+      `Smart Auto-Extend: Added 30-minute block (${newCount}/${max}) for Booking ${booking.bookingRef}. New scheduled end: ${formattedNewTime}. Charge: ₹${blockCharge}.`
+    );
+
+    return {
+      success: true,
+      autoExtensionCount: newCount,
+      maxReached: newCount >= max,
+      addedMinutes: 30,
+      newScheduledEndTime: formattedNewTime,
+      message: `Smart Auto-Extend: Added 30-minute block (${newCount}/${max}). Valid until ${formattedNewTime}.`,
+      reroutedSlot,
+      booking,
+    };
+  }
+
+  public checkAndCalculateOverstay(bookingId: string): {
+    overstayMinutes: number;
+    isInGracePeriod: boolean;
+    isOverstaying: boolean;
+    overstayCharge: number;
+    autoExtended?: boolean;
+    autoExtensionMessage?: string;
+  } {
+    const booking = this.bookings.find((b) => b.id === bookingId);
+    if (!booking || !booking.scheduledEndTime || booking.status === 'COMPLETED' || booking.status === 'CANCELLED') {
+      return { overstayMinutes: 0, isInGracePeriod: false, isOverstaying: false, overstayCharge: 0 };
+    }
+
+    const scheduledEndMs = new Date(booking.scheduledEndTime).getTime();
+    const nowMs = Date.now();
+    const diffMinutes = Math.floor((nowMs - scheduledEndMs) / (1000 * 60));
+
+    if (diffMinutes <= 0) {
+      booking.overstayMinutes = 0;
+      booking.isOverstaying = false;
+      booking.isInGracePeriod = false;
+      return { overstayMinutes: 0, isInGracePeriod: false, isOverstaying: false, overstayCharge: booking.overstayCharge || 0 };
+    }
+
+    // Vehicle is past scheduled end time
+    booking.overstayMinutes = diffMinutes;
+
+    // Check if within 15-minute courtesy grace period
+    if (diffMinutes <= 15) {
+      booking.isInGracePeriod = true;
+      booking.isOverstaying = false;
+      return { overstayMinutes: diffMinutes, isInGracePeriod: true, isOverstaying: false, overstayCharge: booking.overstayCharge || 0 };
+    }
+
+    // Past 15 minutes: Check if Smart Auto-Extend is enabled!
+    if (booking.smartAutoExtendEnabled !== false && (booking.autoExtensionCount || 0) < (booking.maxAutoExtensions || 3)) {
+      const autoRes = this.executeSmartAutoExtendBlock(bookingId);
+      if (autoRes.success) {
+        return {
+          overstayMinutes: 0,
+          isInGracePeriod: false,
+          isOverstaying: false,
+          overstayCharge: booking.overstayCharge || 0,
+          autoExtended: true,
+          autoExtensionMessage: autoRes.message,
+        };
+      }
+    }
+
+    // Overstay confirmed and either auto-extend is disabled or max extensions reached
+    booking.isInGracePeriod = false;
+    booking.isOverstaying = true;
+    const excessMinutes = diffMinutes - 15;
+    const hourlyCharge = Math.ceil(excessMinutes / 60) * booking.hourlyRate;
+    const penalty = (booking.autoExtensionCount || 0) >= (booking.maxAutoExtensions || 3) ? (booking.penaltyAmount || 50) : 0;
+    booking.overstayCharge = hourlyCharge + penalty;
+
+    return {
+      overstayMinutes: diffMinutes,
+      isInGracePeriod: false,
+      isOverstaying: true,
+      overstayCharge: booking.overstayCharge,
+    };
+  }
+
+  public extendBooking(
+    bookingId: string,
+    additionalMinutes: number
+  ): {
+    success: boolean;
+    booking?: Booking;
+    reroutedAlternativeSlot?: string;
+    message: string;
+  } {
+    const booking = this.bookings.find((b) => b.id === bookingId);
+    if (!booking) return { success: false, message: 'Booking not found.' };
+
+    const currentScheduledEnd = booking.scheduledEndTime
+      ? new Date(booking.scheduledEndTime).getTime()
+      : new Date().getTime();
+
+    const baseMs = Math.max(currentScheduledEnd, Date.now());
+    const newScheduledEndMs = baseMs + additionalMinutes * 60 * 1000;
+    const newGraceMs = newScheduledEndMs + 15 * 60 * 1000;
+
+    booking.scheduledEndTime = new Date(newScheduledEndMs).toISOString();
+    booking.gracePeriodExpiresAt = new Date(newGraceMs).toISOString();
+    booking.autoExtendedMinutes = (booking.autoExtendedMinutes || 0) + additionalMinutes;
+    booking.isOverstaying = false;
+    booking.isInGracePeriod = false;
+    booking.overstayMinutes = 0;
+
+    // Proactively check if another incoming booking was made for this exact slot
+    const conflictingBooking = this.bookings.find(
+      (b) =>
+        b.id !== booking.id &&
+        b.slotId === booking.slotId &&
+        (b.status === 'CONFIRMED' || b.status === 'ACTIVE')
+    );
+
+    let reroutedAlternativeSlot: string | undefined = undefined;
+    if (conflictingBooking) {
+      // ADSA Min-Heap Dynamic Rerouting: Find closest free slot in same zone
+      const alternativeSlot =
+        this.slots.find(
+          (s) => s.id !== booking.slotId && s.zoneCode === booking.zoneCode && s.status === 'AVAILABLE'
+        ) || this.slots.find((s) => s.status === 'AVAILABLE');
+
+      if (alternativeSlot) {
+        conflictingBooking.slotId = alternativeSlot.id;
+        conflictingBooking.slotNumber = alternativeSlot.slotNumber;
+        conflictingBooking.zoneCode = alternativeSlot.zoneCode;
+        alternativeSlot.status = 'RESERVED';
+        alternativeSlot.currentVehiclePlate = conflictingBooking.vehiclePlate;
+        reroutedAlternativeSlot = alternativeSlot.slotNumber;
+        booking.reroutedAlternativeSlot = alternativeSlot.slotNumber;
+
+        this.logAudit(
+          'CONFLICT_DYNAMICALLY_RESOLVED',
+          `ADSA Min-Heap automatically rerouted conflicting incoming booking ${conflictingBooking.bookingRef} to alternative Bay ${alternativeSlot.slotNumber} to protect current driver from towing/clamping.`
+        );
+      }
+    }
+
+    this.logAudit(
+      'BOOKING_EXTENDED',
+      `Booking ${booking.bookingRef} extended by ${additionalMinutes} mins. New end time: ${new Date(newScheduledEndMs).toLocaleTimeString()}.`
+    );
+
+    return {
+      success: true,
+      booking,
+      reroutedAlternativeSlot,
+      message: `Extended by ${additionalMinutes} minutes. Smart Conflict Resolution active.`,
+    };
+  }
+
+  public simulateOverstay(bookingId: string, overstayMinutes: number = 45): {
+    success: boolean;
+    booking?: Booking;
+    autoExtended?: boolean;
+    autoExtensionCount?: number;
+    maxReached?: boolean;
+    penaltyApplied?: boolean;
+    addedMinutes?: number;
+    newScheduledEndTime?: string;
+    message?: string;
+  } {
+    const booking = this.bookings.find((b) => b.id === bookingId);
+    if (!booking) return { success: false, message: 'Booking not found.' };
+
+    // If Smart Auto-Extend is enabled on this booking:
+    if (booking.smartAutoExtendEnabled !== false) {
+      const currentCount = booking.autoExtensionCount || 0;
+      const max = booking.maxAutoExtensions || 3;
+
+      if (currentCount < max) {
+        // Automatically add 30-minute block!
+        const autoRes = this.executeSmartAutoExtendBlock(bookingId);
+        
+        // Ensure slot is marked OCCUPIED by this vehicle
+        const slot = this.slots.find((s) => s.id === booking.slotId);
+        if (slot) {
+          slot.status = 'OCCUPIED';
+          slot.occupiedSince = booking.startTime;
+          slot.currentVehiclePlate = booking.vehiclePlate;
+        }
+        booking.status = 'ACTIVE';
+
+        return {
+          success: true,
+          booking,
+          autoExtended: true,
+          autoExtensionCount: autoRes.autoExtensionCount,
+          maxReached: autoRes.maxReached,
+          addedMinutes: 30,
+          newScheduledEndTime: autoRes.newScheduledEndTime,
+          message: `Smart Auto-Extend (${autoRes.autoExtensionCount}/${max}): Detected overstay and added 30-min block without penalty. Valid until ${autoRes.newScheduledEndTime}.`,
+        };
+      } else {
+        // Max 3 extensions exhausted: Apply penalty!
+        booking.penaltyApplied = true;
+        booking.penaltyAmount = 50;
+        booking.isOverstaying = true;
+        booking.isInGracePeriod = false;
+        booking.overstayMinutes = overstayMinutes;
+        // Total overstay charge includes standard prorated overtime + ₹50 penalty
+        const baseOvertime = Math.ceil(overstayMinutes / 60) * booking.hourlyRate;
+        booking.overstayCharge = (booking.overstayCharge || 0) + baseOvertime + 50;
+        booking.status = 'ACTIVE';
+
+        const slot = this.slots.find((s) => s.id === booking.slotId);
+        if (slot) {
+          slot.status = 'OCCUPIED';
+          slot.occupiedSince = booking.startTime;
+          slot.currentVehiclePlate = booking.vehiclePlate;
+        }
+
+        this.logAudit(
+          'OVERSTAY_PENALTY_APPLIED',
+          `Maximum 3 auto-extensions (90 mins) exhausted for Booking ${booking.bookingRef}. ₹50 overstay penalty applied.`
+        );
+
+        return {
+          success: true,
+          booking,
+          autoExtended: false,
+          maxReached: true,
+          penaltyApplied: true,
+          message: `Maximum 3 auto-extensions (90 mins) reached. Overstay penalty of ₹50 applied.`,
+        };
+      }
+    }
+
+    // Fallback: Smart Auto-Extend is DISABLED
+    const nowMs = Date.now();
+    const durationMs = 2 * 3600 * 1000;
+    const newScheduledEndMs = nowMs - overstayMinutes * 60 * 1000;
+    const newStartMs = newScheduledEndMs - durationMs;
+
+    booking.startTime = new Date(newStartMs).toISOString();
+    booking.scheduledEndTime = new Date(newScheduledEndMs).toISOString();
+    booking.gracePeriodExpiresAt = new Date(newScheduledEndMs + 15 * 60 * 1000).toISOString();
+    booking.overstayMinutes = overstayMinutes;
+    booking.status = 'ACTIVE';
+
+    if (overstayMinutes <= 15) {
+      booking.isInGracePeriod = true;
+      booking.isOverstaying = false;
+      booking.overstayCharge = 0;
+    } else {
+      booking.isInGracePeriod = false;
+      booking.isOverstaying = true;
+      booking.overstayCharge = Math.ceil((overstayMinutes - 15) / 60) * booking.hourlyRate;
+    }
+
+    const slot = this.slots.find((s) => s.id === booking.slotId);
+    if (slot) {
+      slot.status = 'OCCUPIED';
+      slot.occupiedSince = new Date(newStartMs).toISOString();
+      slot.currentVehiclePlate = booking.vehiclePlate;
+    }
+
+    this.logAudit(
+      'OVERSTAY_SIMULATED',
+      `Simulated ${overstayMinutes}m overstay for Booking ${booking.bookingRef} (Smart Auto-Extend disabled). Standard overtime billing applied.`
+    );
+
+    return {
+      success: true,
+      booking,
+      autoExtended: false,
+      message: `Simulated ${overstayMinutes}m overstay. Smart Auto-Extend is disabled: Standard overtime charges applied.`,
+    };
+  }
+
+  public resetAutoExtensions(bookingId: string): { success: boolean; booking?: Booking } {
+    const booking = this.bookings.find((b) => b.id === bookingId);
+    if (!booking) return { success: false };
+    booking.autoExtensionCount = 0;
+    booking.autoExtendedMinutes = 0;
+    booking.penaltyApplied = false;
+    booking.penaltyAmount = 0;
+    booking.isOverstaying = false;
+    booking.isInGracePeriod = false;
+    booking.overstayMinutes = 0;
+    booking.overstayCharge = 0;
+    const newEndMs = Date.now() + 2 * 3600 * 1000;
+    booking.scheduledEndTime = new Date(newEndMs).toISOString();
+    booking.gracePeriodExpiresAt = new Date(newEndMs + 15 * 60 * 1000).toISOString();
+    this.logAudit(
+      'AUTO_EXTENSIONS_RESET',
+      `Auto-extension counter reset to 0/3 for Booking ${booking.bookingRef}.`
+    );
+    return { success: true, booking };
   }
 
   // Admin slot management
@@ -569,6 +986,39 @@ export class DbmsEngine {
         },
       },
     ];
+  }
+
+  public updateMallContext(mall: IndianMall) {
+    if (this.zones.length >= 4) {
+      this.zones[0].name = mall.zonesDescription.zoneA;
+      this.zones[0].entryGate = mall.entryGates[0]?.name || 'Gate 1 (North)';
+      this.zones[0].baseRatePerHour = Math.round(mall.hourlyParkingRateINR * 0.9);
+
+      this.zones[1].name = mall.zonesDescription.zoneB;
+      this.zones[1].entryGate = mall.entryGates[1]?.name || 'Gate 2 (South)';
+      this.zones[1].baseRatePerHour = mall.hourlyParkingRateINR;
+
+      this.zones[2].name = mall.zonesDescription.zoneC;
+      this.zones[2].entryGate = mall.entryGates[2]?.name || 'Gate 3 (West)';
+      this.zones[2].baseRatePerHour = Math.round(mall.hourlyParkingRateINR * 0.8);
+
+      this.zones[3].name = mall.zonesDescription.zoneD;
+      this.zones[3].entryGate = mall.entryGates[3]?.name || 'Gate 4 (East)';
+      this.zones[3].baseRatePerHour = Math.round(mall.hourlyParkingRateINR * 1.3);
+
+      this.slots.forEach((s) => {
+        if (s.zoneCode === 'A') s.hourlyRate = this.zones[0].baseRatePerHour;
+        else if (s.zoneCode === 'B') s.hourlyRate = this.zones[1].baseRatePerHour;
+        else if (s.zoneCode === 'C') s.hourlyRate = this.zones[2].baseRatePerHour;
+        else if (s.zoneCode === 'D') s.hourlyRate = this.zones[3].baseRatePerHour;
+      });
+
+      this.auditLogs.unshift({
+        timestamp: new Date().toLocaleTimeString(),
+        action: 'MALL_CONTEXT_UPDATED',
+        details: `Active parking facility synced with: ${mall.name} (${mall.city}). Capacity: ${mall.parkingCapacity} bays.`,
+      });
+    }
   }
 }
 

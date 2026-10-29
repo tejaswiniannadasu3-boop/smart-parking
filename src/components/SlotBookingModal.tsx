@@ -185,7 +185,7 @@ export const SlotBookingModal: React.FC<SlotBookingModalProps> = ({
           <div className="bg-slate-850 border border-slate-800 rounded-xl p-3.5 space-y-1.5 text-xs">
             <div className="flex justify-between text-slate-400">
               <span>Hourly Rate</span>
-              <span>${slot.hourlyRate}.00</span>
+              <span>₹{slot.hourlyRate}.00/hr</span>
             </div>
             <div className="flex justify-between text-slate-400">
               <span>Duration Multiplier</span>
@@ -197,7 +197,7 @@ export const SlotBookingModal: React.FC<SlotBookingModalProps> = ({
             </div>
             <div className="flex justify-between text-sm font-bold text-white pt-2 border-t border-slate-750">
               <span>Estimated Payable</span>
-              <span className="text-emerald-400 font-mono">${estimatedTotal}.00</span>
+              <span className="text-emerald-400 font-mono">₹{estimatedTotal}.00</span>
             </div>
           </div>
 

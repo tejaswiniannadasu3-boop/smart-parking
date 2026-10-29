@@ -7,12 +7,16 @@ import {
   Vehicle,
   AppTheme,
   SlotType,
+  IndianMall,
+  AppLanguage,
 } from './types';
 import { dbms } from './services/dbmsEngine';
 import { AdsaMinHeap } from './services/adsaHeap';
 import { PythonOccupancyPredictor } from './services/pythonPredictor';
 import { soundEffects } from './services/soundEffects';
 import { speechAssistant, VoiceCommandResult } from './services/speechAssistant';
+import { INDIAN_MALLS_DATA } from './data/indianMalls';
+import { translations } from './i18n/translations';
 
 import { Parking3DView } from './components/Parking3DView';
 import { DigitalTicketModal } from './components/DigitalTicketModal';
@@ -31,18 +35,21 @@ import { DoubleBookingAlertModal } from './components/DoubleBookingAlertModal';
 import { AuthModal } from './components/AuthModal';
 import { MyParkingView } from './components/MyParkingView';
 import { ThemeSettingsModal } from './components/ThemeSettingsModal';
+import { IndianMallsModal } from './components/IndianMallsModal';
 
 import {
   Activity,
   AlertCircle,
   Binary,
   BookOpen,
+  Building2,
   Car,
   CheckCircle2,
   Compass,
   Database,
   Eye,
   Filter,
+  Globe,
   Grid,
   History,
   Layers,
@@ -75,6 +82,14 @@ export default function App() {
   const [bookings, setBookings] = useState<Booking[]>(() => [...dbms.bookings]);
   const [currentUser, setCurrentUser] = useState<User>(dbms.users[0]);
 
+  // Active Indian Mall Hub State
+  const [activeMall, setActiveMall] = useState<IndianMall>(() => INDIAN_MALLS_DATA[0]);
+  const [isIndianMallsModalOpen, setIsIndianMallsModalOpen] = useState<boolean>(false);
+
+  // Multilingual State (English, Telugu, Hindi, Tamil, Kannada)
+  const [language, setLanguage] = useState<AppLanguage>('en');
+  const t = translations[language];
+
   // Active Interactive State
   const [selectedSlotId, setSelectedSlotId] = useState<string | null>(null);
   const [activeGate, setActiveGate] = useState<string>('Gate 1');
@@ -102,8 +117,9 @@ export default function App() {
 
   const [alertBanner, setAlertBanner] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
 
-  // Initialize data on load
+  // Initialize data on load and sync active Indian Mall
   useEffect(() => {
+    dbms.updateMallContext(activeMall);
     refreshData();
   }, []);
 
@@ -111,6 +127,130 @@ export default function App() {
     setSlots([...dbms.slots]);
     setZones([...dbms.zones]);
     setBookings([...dbms.bookings]);
+  };
+
+  // Regularly update overstay calculations for active bookings
+  useEffect(() => {
+    const timer = setInterval(() => {
+      const active = bookings.find((b) => b.status === 'ACTIVE' || b.status === 'CONFIRMED');
+      if (active) {
+        const res = dbms.checkAndCalculateOverstay(active.id);
+        if (res.autoExtended) {
+          refreshData();
+          soundEffects.playBookingSuccess();
+          showAlert(
+            res.autoExtensionMessage ||
+              `🔔 Smart Auto-Extend: Overstay detected! Automatically added 30-minute block to Bay ${active.slotNumber}.`,
+            'success'
+          );
+          if (speechAssistant.voiceNotificationsEnabled) {
+            speechAssistant.speak('Overstay detected. Smart Auto-Extend added thirty minutes to your reservation.');
+          }
+        } else {
+          refreshData();
+        }
+      }
+    }, 12000);
+    return () => clearInterval(timer);
+  }, [bookings]);
+
+  const handleToggleSmartAutoExtend = (bookingId: string, enabled: boolean) => {
+    const res = dbms.toggleSmartAutoExtend(bookingId, enabled);
+    if (res.success) {
+      refreshData();
+      soundEffects.playSlotSelect();
+      const msg = enabled
+        ? 'Smart Auto-Extend ENABLED: Overstay will automatically add 30-min blocks up to 3 times before applying penalty.'
+        : 'Smart Auto-Extend DISABLED: Overstay will directly incur standard overtime charges.';
+      showAlert(msg);
+      if (speechAssistant.voiceNotificationsEnabled) {
+        speechAssistant.speak(
+          enabled
+            ? 'Smart Auto-Extend enabled. System will automatically add up to three 30-minute extensions.'
+            : 'Smart Auto-Extend disabled.'
+        );
+      }
+    }
+  };
+
+  const handleResetAutoExtensions = (bookingId: string) => {
+    const res = dbms.resetAutoExtensions(bookingId);
+    if (res.success) {
+      refreshData();
+      soundEffects.playSlotSelect();
+      showAlert('Smart Auto-Extend counter reset to 0/3 blocks.');
+      if (speechAssistant.voiceNotificationsEnabled) {
+        speechAssistant.speak('Auto-extension blocks reset to zero.');
+      }
+    }
+  };
+
+  const handleExtendBooking = (bookingId: string, additionalMinutes: number) => {
+    const res = dbms.extendBooking(bookingId, additionalMinutes);
+    if (res.success) {
+      refreshData();
+      soundEffects.playBookingSuccess();
+      showAlert(
+        `Pass extended by +${additionalMinutes} mins. Smart conflict shield re-routed any conflicting incoming bookings.`
+      );
+      if (speechAssistant.voiceNotificationsEnabled) {
+        speechAssistant.speak(`Parking pass extended by ${additionalMinutes} minutes. No penalty applied.`);
+      }
+    }
+  };
+
+  const handleSimulateOverstay = (bookingId: string) => {
+    const res = dbms.simulateOverstay(bookingId, 45);
+    if (res.success) {
+      refreshData();
+      if (res.autoExtended) {
+        soundEffects.playBookingSuccess();
+        const count = res.autoExtensionCount || 1;
+        showAlert(
+          `🔔 Smart Auto-Extend (${count}/3): Overstay detected! Added 30-minute block without penalty. Valid until ${res.newScheduledEndTime}.`,
+          'success'
+        );
+        if (speechAssistant.voiceNotificationsEnabled) {
+          speechAssistant.speak(
+            `Overstay detected. Smart Auto-Extend added thirty minutes to your booking. Extension ${count} of three applied.`
+          );
+        }
+      } else if (res.penaltyApplied) {
+        soundEffects.playDoubleBookingAlert();
+        showAlert(
+          `⚠️ Penalty Applied: Maximum 3 auto-extensions (90 mins) exhausted. ₹50 overstay penalty applied.`,
+          'error'
+        );
+        if (speechAssistant.voiceNotificationsEnabled) {
+          speechAssistant.speak(
+            'Maximum three auto-extensions exhausted. Overstay penalty of fifty rupees has been applied.'
+          );
+        }
+      } else {
+        soundEffects.playDoubleBookingAlert();
+        showAlert(
+          'Overstay detected (+45m). Smart Auto-Extend is disabled: Standard overtime charges applied.',
+          'error'
+        );
+        if (speechAssistant.voiceNotificationsEnabled) {
+          speechAssistant.speak('Overstay detected. Smart Auto-Extend is disabled.');
+        }
+      }
+    }
+  };
+
+  const handleSelectMall = (mall: IndianMall) => {
+    setActiveMall(mall);
+    dbms.updateMallContext(mall);
+    refreshData();
+    if (mall.entryGates.length > 0) {
+      setActiveGate(mall.entryGates[0].code);
+    }
+    showAlert(`SmartPark connected to ${mall.name} (${mall.city})! Parking gates & wings synchronized.`);
+    if (speechAssistant.voiceNotificationsEnabled) {
+      speechAssistant.speak(`Connected to ${mall.name} in ${mall.city}.`);
+    }
+    setIsIndianMallsModalOpen(false);
   };
 
   const showAlert = (message: string, type: 'success' | 'error' = 'success') => {
@@ -299,6 +439,19 @@ export default function App() {
         refreshData();
         showAlert('Booking cancelled and slot released.');
       }
+    } else if (cmd.action === 'SHOW_MALLS') {
+      setIsIndianMallsModalOpen(true);
+      showAlert('Voice Assistant: Opening All Malls in India directory.');
+      if (speechAssistant.voiceNotificationsEnabled) {
+        speechAssistant.speak('Opening All Malls in India directory. You can browse and connect to any shopping hub.');
+      }
+    } else if (cmd.action === 'TOGGLE_AUTO_EXTEND') {
+      if (latestActiveBooking) {
+        const nextState = !(latestActiveBooking.smartAutoExtendEnabled !== false);
+        handleToggleSmartAutoExtend(latestActiveBooking.id, nextState);
+      } else {
+        showAlert('No active booking to configure Smart Auto-Extend.', 'error');
+      }
     }
   };
 
@@ -355,12 +508,37 @@ export default function App() {
               Intelligent Mall Parking • ADSA Min-Heap • Python ML • DBMS
             </p>
           </div>
+
+          {/* Active Indian Mall Hub Selector */}
+          <button
+            onClick={() => {
+              soundEffects.playSlotSelect();
+              setIsIndianMallsModalOpen(true);
+            }}
+            className="flex items-center gap-2 px-2.5 py-1.5 rounded-xl bg-orange-950/40 hover:bg-orange-900/60 border border-orange-500/40 text-orange-200 transition group shadow-sm text-left"
+            title="Browse all shopping malls in India and switch parking hub"
+          >
+            <div className="w-7 h-7 rounded-lg bg-orange-500/20 text-orange-300 flex items-center justify-center font-bold text-xs shrink-0">
+              🇮🇳
+            </div>
+            <div className="hidden sm:block">
+              <div className="text-[9px] text-orange-400 font-bold uppercase tracking-wider flex items-center gap-1">
+                {t.activeMallHub} • {activeMall.city}
+              </div>
+              <div className="text-xs font-bold text-white truncate max-w-[130px] lg:max-w-[170px]">
+                {activeMall.name}
+              </div>
+            </div>
+            <span className="text-[10px] px-1.5 py-0.5 rounded bg-orange-500/30 text-orange-200 font-bold border border-orange-500/40 shrink-0">
+              {t.allMalls} ({INDIAN_MALLS_DATA.length})
+            </span>
+          </button>
         </div>
 
         {/* Center: Entrance Gate Selector */}
         <div className="hidden md:flex items-center gap-2 bg-slate-850 p-1 rounded-xl border border-slate-750 text-xs">
           <span className="text-slate-400 text-[11px] px-2 font-medium flex items-center gap-1">
-            <Compass size={13} className="text-cyan-400" /> Entry Gate:
+            <Compass size={13} className="text-cyan-400" /> {t.entryGate}:
           </span>
           {['Gate 1', 'Gate 2', 'Gate 3', 'Gate 4'].map((g) => (
             <button
@@ -393,7 +571,7 @@ export default function App() {
               }`}
               title="Interactive 3D Virtual Parking Floor"
             >
-              <Eye size={14} /> <span className="hidden sm:inline">3D View</span>
+              <Eye size={14} /> <span className="hidden sm:inline">{t.view3d}</span>
             </button>
             <button
               onClick={() => setMainViewMode('2d')}
@@ -404,7 +582,7 @@ export default function App() {
               }`}
               title="2D Parking Bay Map"
             >
-              <Grid size={14} /> <span className="hidden sm:inline">2D Map</span>
+              <Grid size={14} /> <span className="hidden sm:inline">{t.view2d}</span>
             </button>
             <button
               onClick={() => setMainViewMode('myparking')}
@@ -415,7 +593,7 @@ export default function App() {
               }`}
               title="My Parking & Booking History"
             >
-              <History size={14} /> <span className="hidden sm:inline">My Parking</span>
+              <History size={14} /> <span className="hidden sm:inline">{t.myParking}</span>
               {latestActiveBooking && (
                 <span className="w-2 h-2 rounded-full bg-emerald-400 absolute -top-0.5 -right-0.5 animate-pulse" />
               )}
@@ -429,7 +607,7 @@ export default function App() {
               }`}
               title="Live Occupancy & Python ML Predictions"
             >
-              <Activity size={14} /> <span className="hidden sm:inline">Analytics</span>
+              <Activity size={14} /> <span className="hidden sm:inline">{t.analytics}</span>
             </button>
             <button
               onClick={() => setMainViewMode('admin')}
@@ -440,9 +618,21 @@ export default function App() {
               }`}
               title="Mall Operator Admin Console"
             >
-              <Sliders size={14} /> <span className="hidden sm:inline">Admin</span>
+              <Sliders size={14} /> <span className="hidden sm:inline">{t.admin}</span>
             </button>
           </div>
+
+          {/* All Indian Malls Directory Trigger */}
+          <button
+            onClick={() => {
+              soundEffects.playSlotSelect();
+              setIsIndianMallsModalOpen(true);
+            }}
+            className="p-2 rounded-xl bg-orange-950/60 hover:bg-orange-900/80 border border-orange-500/50 text-orange-400 transition"
+            title="All Malls in India Directory & Multi-Mall Switcher"
+          >
+            <Building2 size={17} />
+          </button>
 
           {/* Guide & Specification Modal Trigger */}
           <button
@@ -489,6 +679,34 @@ export default function App() {
             <Mic size={17} />
           </button>
 
+          {/* Multilingual Selector (English, Telugu, Hindi, Tamil, Kannada) */}
+          <div className="flex items-center bg-slate-850 border border-slate-750 p-1 rounded-xl text-xs">
+            <Globe size={14} className="text-cyan-400 mx-1.5 shrink-0" />
+            <select
+              value={language}
+              onChange={(e) => {
+                const lang = e.target.value as AppLanguage;
+                setLanguage(lang);
+                soundEffects.playSlotSelect();
+                if (speechAssistant.voiceNotificationsEnabled) {
+                  if (lang === 'te') speechAssistant.speak('స్మార్ట్ పార్క్‌కు స్వాగతం.');
+                  else if (lang === 'hi') speechAssistant.speak('स्मार्टपार्क में आपका स्वागत है.');
+                  else if (lang === 'ta') speechAssistant.speak('ஸ்மார்ட்பார்க்கிற்கு வரவேற்கிறோம்.');
+                  else if (lang === 'kn') speechAssistant.speak('ಸ್ಮಾರ್ಟ್‌ಪಾರ್ಕ್‌ಗೆ ಸುಸ್ವಾಗತ.');
+                  else speechAssistant.speak('Language updated to English.');
+                }
+              }}
+              className="bg-transparent text-slate-200 font-semibold focus:outline-none pr-1 cursor-pointer text-xs"
+              title="Change Language / భాషను మార్చండి / भाषा बदलें"
+            >
+              <option value="en" className="bg-slate-900 text-white">English</option>
+              <option value="te" className="bg-slate-900 text-white">తెలుగు (Telugu)</option>
+              <option value="hi" className="bg-slate-900 text-white">हिंदी (Hindi)</option>
+              <option value="ta" className="bg-slate-900 text-white">தமிழ் (Tamil)</option>
+              <option value="kn" className="bg-slate-900 text-white">ಕನ್ನಡ (Kannada)</option>
+            </select>
+          </div>
+
           {/* Theme & Sound Settings Modal Trigger */}
           <button
             onClick={() => setIsThemeSettingsOpen(true)}
@@ -516,47 +734,102 @@ export default function App() {
       <main className="flex-1 p-4 lg:p-6 max-w-7xl w-full mx-auto space-y-6">
         {/* Active Digital Ticket Alert Strip (If user has a confirmed booking) */}
         {latestActiveBooking && (
-          <div className="bg-gradient-to-r from-cyan-900/60 to-blue-900/60 border border-cyan-500/50 rounded-2xl p-4 flex items-center justify-between gap-4 shadow-lg">
-            <div className="flex items-center gap-3">
-              <div className="p-2.5 bg-cyan-500/20 border border-cyan-400/40 rounded-xl text-cyan-300">
-                <QrCode size={22} />
+          <div
+            className={`border rounded-2xl p-4 shadow-lg transition-all ${
+              latestActiveBooking.isOverstaying
+                ? 'bg-gradient-to-r from-amber-950/80 via-slate-900 to-orange-950/80 border-amber-500/60'
+                : latestActiveBooking.isInGracePeriod
+                ? 'bg-gradient-to-r from-emerald-950/80 via-slate-900 to-cyan-950/80 border-emerald-500/60'
+                : 'bg-gradient-to-r from-cyan-900/60 to-blue-900/60 border-cyan-500/50'
+            }`}
+          >
+            <div className="flex flex-wrap items-center justify-between gap-4">
+              <div className="flex items-center gap-3">
+                <div
+                  className={`p-2.5 rounded-xl border ${
+                    latestActiveBooking.isOverstaying
+                      ? 'bg-amber-500/20 border-amber-400/40 text-amber-300'
+                      : latestActiveBooking.isInGracePeriod
+                      ? 'bg-emerald-500/20 border-emerald-400/40 text-emerald-300'
+                      : 'bg-cyan-500/20 border-cyan-400/40 text-cyan-300'
+                  }`}
+                >
+                  <QrCode size={22} />
+                </div>
+                <div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-xs font-bold text-cyan-300 uppercase tracking-wider">
+                      {t.activeTicket}
+                    </span>
+                    <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-cyan-950 text-cyan-200 border border-cyan-800">
+                      {latestActiveBooking.bookingRef}
+                    </span>
+                    {latestActiveBooking.isOverstaying ? (
+                      <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-amber-500/20 text-amber-300 border border-amber-500/40 animate-pulse">
+                        +{latestActiveBooking.overstayMinutes}m Overstay
+                      </span>
+                    ) : latestActiveBooking.isInGracePeriod ? (
+                      <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-500/20 text-emerald-400 border border-emerald-500/40">
+                        {t.gracePeriodActive}
+                      </span>
+                    ) : null}
+                  </div>
+                  <div className="text-sm font-semibold text-white mt-0.5">
+                    Bay {latestActiveBooking.slotNumber} (Zone {latestActiveBooking.zoneCode}) •{' '}
+                    {latestActiveBooking.vehiclePlate}
+                  </div>
+                </div>
               </div>
-              <div>
-                <div className="flex items-center gap-2">
-                  <span className="text-xs font-bold text-cyan-300 uppercase tracking-wider">
-                    Active Parking Pass
-                  </span>
-                  <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-cyan-950 text-cyan-200 border border-cyan-800">
-                    {latestActiveBooking.bookingRef}
-                  </span>
-                </div>
-                <div className="text-sm font-semibold text-white mt-0.5">
-                  Bay {latestActiveBooking.slotNumber} (Zone {latestActiveBooking.zoneCode}) •{' '}
-                  {latestActiveBooking.vehiclePlate}
-                </div>
+
+              <div className="flex flex-wrap items-center gap-2">
+                {/* 1-Tap Quick Extend buttons if in overstay or nearing end */}
+                <button
+                  onClick={() => handleExtendBooking(latestActiveBooking.id, 30)}
+                  className="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-cyan-300 text-xs font-semibold border border-slate-700 transition"
+                  title="Quick extend by 30 mins"
+                >
+                  +30m
+                </button>
+                <button
+                  onClick={() => handleExtendBooking(latestActiveBooking.id, 60)}
+                  className="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-emerald-300 text-xs font-semibold border border-slate-700 transition"
+                  title="Quick extend by 1 hour"
+                >
+                  +1h
+                </button>
+                <button
+                  onClick={() => {
+                    setSelectedSlotId(latestActiveBooking.slotId);
+                    setIsNavModalOpen(true);
+                  }}
+                  className="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold flex items-center gap-1.5 transition"
+                >
+                  <Navigation size={14} className="text-cyan-400" /> {t.turnByTurn}
+                </button>
+                <button
+                  onClick={() => {
+                    setActiveTicketBooking(latestActiveBooking);
+                    setIsTicketModalOpen(true);
+                  }}
+                  className="px-4 py-2 rounded-xl bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-bold flex items-center gap-1.5 transition shadow-lg shadow-cyan-950/50"
+                >
+                  <QrCode size={14} /> {t.openTicket}
+                </button>
               </div>
             </div>
 
-            <div className="flex items-center gap-2">
-              <button
-                onClick={() => {
-                  setSelectedSlotId(latestActiveBooking.slotId);
-                  setIsNavModalOpen(true);
-                }}
-                className="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold flex items-center gap-1.5 transition"
-              >
-                <Navigation size={14} className="text-cyan-400" /> Turn-by-Turn Route
-              </button>
-              <button
-                onClick={() => {
-                  setActiveTicketBooking(latestActiveBooking);
-                  setIsTicketModalOpen(true);
-                }}
-                className="px-4 py-2 rounded-xl bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-bold flex items-center gap-1.5 transition shadow-lg shadow-cyan-950/50"
-              >
-                <QrCode size={14} /> Open Digital Ticket
-              </button>
-            </div>
+            {/* If Overstaying, show Conflict Resolution alert inline */}
+            {latestActiveBooking.isOverstaying && (
+              <div className="mt-3 pt-2.5 border-t border-amber-900/40 text-[11px] text-amber-200 flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-center gap-1.5">
+                  <Sparkles size={13} className="text-amber-400 shrink-0" />
+                  <span>{t.conflictShieldDesc}</span>
+                </div>
+                <span className="font-semibold text-white bg-amber-950/60 px-2 py-0.5 rounded border border-amber-800/40">
+                  {t.fairTariffNotice}: ₹{latestActiveBooking.overstayCharge || 0}
+                </span>
+              </div>
+            )}
           </div>
         )}
 
@@ -870,6 +1143,11 @@ export default function App() {
                 setIsTicketModalOpen(true);
               }
             }}
+            onExtendBooking={handleExtendBooking}
+            onSimulateOverstay={handleSimulateOverstay}
+            onToggleSmartAutoExtend={handleToggleSmartAutoExtend}
+            onResetAutoExtensions={handleResetAutoExtensions}
+            language={language}
           />
         )}
 
@@ -1010,13 +1288,18 @@ export default function App() {
       <DigitalTicketModal
         isOpen={isTicketModalOpen}
         onClose={() => setIsTicketModalOpen(false)}
-        booking={activeTicketBooking}
+        booking={activeTicketBooking || latestActiveBooking}
         onVehicleArrived={handleVehicleArrived}
         onVehicleExited={handleVehicleExited}
         onNavigateToSlot={(slotId) => {
           setSelectedSlotId(slotId);
           setIsNavModalOpen(true);
         }}
+        onExtendBooking={handleExtendBooking}
+        onSimulateOverstay={handleSimulateOverstay}
+        onToggleSmartAutoExtend={handleToggleSmartAutoExtend}
+        onResetAutoExtensions={handleResetAutoExtensions}
+        language={language}
       />
 
       <AdsaHeapWorkbench
@@ -1073,6 +1356,13 @@ export default function App() {
             setMainViewMode('3d');
           }
         }}
+      />
+
+      <IndianMallsModal
+        isOpen={isIndianMallsModalOpen}
+        onClose={() => setIsIndianMallsModalOpen(false)}
+        activeMall={activeMall}
+        onSelectMall={handleSelectMall}
       />
     </div>
   );

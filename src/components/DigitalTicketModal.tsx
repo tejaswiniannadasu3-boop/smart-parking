@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
-import { Booking } from '../types';
+import { Booking, AppLanguage } from '../types';
+import { translations } from '../i18n/translations';
 import {
   CheckCircle2,
   Clock,
@@ -34,6 +35,11 @@ interface DigitalTicketModalProps {
   onVehicleArrived: (bookingId: string) => void;
   onVehicleExited: (bookingId: string) => void;
   onNavigateToSlot: (slotId: string) => void;
+  onExtendBooking?: (bookingId: string, additionalMinutes: number) => void;
+  onSimulateOverstay?: (bookingId: string) => void;
+  onToggleSmartAutoExtend?: (bookingId: string, enabled: boolean) => void;
+  onResetAutoExtensions?: (bookingId: string) => void;
+  language?: AppLanguage;
 }
 
 export const DigitalTicketModal: React.FC<DigitalTicketModalProps> = ({
@@ -43,7 +49,13 @@ export const DigitalTicketModal: React.FC<DigitalTicketModalProps> = ({
   onVehicleArrived,
   onVehicleExited,
   onNavigateToSlot,
+  onExtendBooking,
+  onSimulateOverstay,
+  onToggleSmartAutoExtend,
+  onResetAutoExtensions,
+  language = 'en',
 }) => {
+  const t = translations[language];
   const [isScannerOpen, setIsScannerOpen] = useState(false);
   const [scanPhase, setScanPhase] = useState<'IDLE' | 'SCANNING' | 'VERIFIED' | 'INVALID'>('IDLE');
   const [scanProgress, setScanProgress] = useState(0);
@@ -242,14 +254,312 @@ export const DigitalTicketModal: React.FC<DigitalTicketModalProps> = ({
             </div>
             <div className="flex justify-between">
               <span className="text-slate-400">Hourly Tariff</span>
-              <span className="font-medium text-emerald-400">${booking.hourlyRate}/hour</span>
+              <span className="font-medium text-emerald-400">₹{booking.hourlyRate}/hour</span>
             </div>
             {booking.totalAmount && (
               <div className="flex justify-between pt-1 font-bold text-sm">
                 <span className="text-slate-300">Total Charged</span>
-                <span className="text-emerald-400">${booking.totalAmount.toFixed(2)}</span>
+                <span className="text-emerald-400">₹{booking.totalAmount.toFixed(2)}</span>
               </div>
             )}
+          </div>
+
+          {/* ========================================================= */}
+          {/* INTELLIGENT OVERSTAY & DYNAMIC EXTENSION BUFFER CARD */}
+          {/* ========================================================= */}
+          <div className="bg-slate-950/90 border border-slate-800 rounded-2xl p-4 space-y-3 shadow-inner">
+            <div className="flex items-center justify-between">
+              <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1.5">
+                <Clock size={13} className="text-cyan-400" />
+                {t.overstayAlert}
+              </span>
+              {booking.isOverstaying ? (
+                <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-amber-500/20 text-amber-400 border border-amber-500/30 animate-pulse">
+                  +{booking.overstayMinutes}m Overstay
+                </span>
+              ) : booking.isInGracePeriod ? (
+                <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
+                  Grace Period Active
+                </span>
+              ) : (
+                <span className="px-2 py-0.5 rounded text-[10px] font-semibold bg-slate-800 text-slate-300">
+                  On Schedule
+                </span>
+              )}
+            </div>
+
+            {/* Overstay Banner Notice */}
+            {booking.isOverstaying ? (
+              <div className="bg-gradient-to-r from-amber-950/50 to-orange-950/40 border border-amber-600/40 rounded-xl p-3 text-xs space-y-2">
+                <div className="flex items-start gap-2">
+                  <ShieldAlert size={16} className="text-amber-400 shrink-0 mt-0.5" />
+                  <div>
+                    <div className="font-bold text-amber-200">
+                      {t.overstayTitle}
+                    </div>
+                    <div className="text-[11px] text-slate-300 mt-0.5">
+                      {t.overstayDesc} (Over by {booking.overstayMinutes} mins).
+                    </div>
+                  </div>
+                </div>
+
+                {/* Intelligent Conflict Shield Notice */}
+                <div className="bg-slate-900/90 p-2.5 rounded-lg border border-slate-800 text-[11px] text-slate-300 flex items-start gap-2">
+                  <Sparkles size={14} className="text-emerald-400 shrink-0 mt-0.5" />
+                  <div>
+                    <span className="font-semibold text-emerald-400">{t.conflictShieldActive}: </span>
+                    <span>{t.conflictShieldDesc}</span>
+                    {booking.reroutedAlternativeSlot && (
+                      <div className="mt-1 text-cyan-300 font-mono text-[10px]">
+                        Incoming reservation redirected to alternative Bay {booking.reroutedAlternativeSlot}.
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                <div className="flex items-center justify-between text-[11px] pt-1 text-amber-300 font-medium border-t border-amber-800/40">
+                  <span>{t.fairTariffNotice}:</span>
+                  <span className="font-bold text-sm">₹{booking.overstayCharge || 0}</span>
+                </div>
+              </div>
+            ) : booking.isInGracePeriod ? (
+              <div className="bg-emerald-950/40 border border-emerald-600/40 rounded-xl p-3 text-xs space-y-1.5">
+                <div className="flex items-center gap-2 text-emerald-300 font-bold">
+                  <CheckCircle2 size={15} className="text-emerald-400" />
+                  <span>{t.gracePeriodActive}</span>
+                </div>
+                <p className="text-[11px] text-slate-300">
+                  {t.gracePeriodDesc} ({booking.overstayMinutes}m into 15m courtesy window). {t.noPenaltyGuarantee}.
+                </p>
+              </div>
+            ) : (
+              <div className="text-[11px] text-slate-400 flex items-center justify-between">
+                <span>Scheduled End: {booking.scheduledEndTime ? new Date(booking.scheduledEndTime).toLocaleTimeString() : 'In 2 hours'}</span>
+                <span className="text-emerald-400 flex items-center gap-1 font-medium">
+                  <ShieldCheck size={12} /> {t.noPenaltyGuarantee}
+                </span>
+              </div>
+            )}
+
+            {/* SMART AUTO-EXTEND TOGGLE & 3-BLOCK SHIELD */}
+            <div className="bg-slate-900/90 border border-slate-800 rounded-xl p-3.5 space-y-3 shadow-sm">
+              <div className="flex items-center justify-between gap-3">
+                <div className="flex items-start gap-2.5">
+                  <div
+                    className={`p-2 rounded-xl shrink-0 transition-colors ${
+                      booking.smartAutoExtendEnabled !== false
+                        ? 'bg-gradient-to-br from-cyan-500/20 to-emerald-500/20 text-cyan-300 border border-cyan-500/30'
+                        : 'bg-slate-800 text-slate-500 border border-slate-750'
+                    }`}
+                  >
+                    <Sparkles size={16} className={booking.smartAutoExtendEnabled !== false ? 'text-cyan-400 animate-pulse' : ''} />
+                  </div>
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs font-bold text-white tracking-tight">{t.smartAutoExtend}</span>
+                      <span
+                        className={`text-[9px] font-bold px-2 py-0.5 rounded-full uppercase tracking-wider ${
+                          booking.smartAutoExtendEnabled !== false
+                            ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'
+                            : 'bg-slate-800 text-slate-400 border border-slate-700'
+                        }`}
+                      >
+                        {booking.smartAutoExtendEnabled !== false ? t.smartAutoExtendEnabled : t.smartAutoExtendDisabled}
+                      </span>
+                    </div>
+                    <p className="text-[10px] text-slate-400 leading-tight mt-1 max-w-[250px]">
+                      {t.smartAutoExtendDesc}
+                    </p>
+                  </div>
+                </div>
+
+                {/* Interactive Toggle Switch */}
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={booking.smartAutoExtendEnabled !== false}
+                  onClick={() => {
+                    soundEffects.playSlotSelect();
+                    onToggleSmartAutoExtend?.(booking.id, !(booking.smartAutoExtendEnabled !== false));
+                  }}
+                  className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-cyan-500 focus:ring-offset-2 focus:ring-offset-slate-900 ${
+                    booking.smartAutoExtendEnabled !== false
+                      ? 'bg-gradient-to-r from-cyan-500 to-emerald-500'
+                      : 'bg-slate-750 hover:bg-slate-700'
+                  }`}
+                  title="Toggle Smart Auto-Extend (3x 30m blocks)"
+                >
+                  <span
+                    className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow-md ring-0 transition duration-200 ease-in-out ${
+                      booking.smartAutoExtendEnabled !== false ? 'translate-x-5' : 'translate-x-0'
+                    }`}
+                  />
+                </button>
+              </div>
+
+              {/* 3-Block Visual Tracker (up to 3x 30-min extensions before penalty) */}
+              <div className="pt-2 border-t border-slate-800 space-y-2">
+                <div className="flex items-center justify-between text-[10px]">
+                  <span className="text-slate-400 font-medium flex items-center gap-1">
+                    <Clock size={11} className="text-cyan-400" />
+                    {t.autoExtensionsUsed}:
+                  </span>
+                  <span className="font-mono font-bold text-cyan-300">
+                    {booking.autoExtensionCount || 0} / {booking.maxAutoExtensions || 3} blocks used ({((booking.autoExtensionCount || 0) * 30)}m added)
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-4 gap-1.5 text-center">
+                  {[1, 2, 3].map((blockNum) => {
+                    const isUsed = (booking.autoExtensionCount || 0) >= blockNum;
+                    return (
+                      <div
+                        key={blockNum}
+                        className={`rounded-lg p-1.5 border transition-all ${
+                          isUsed
+                            ? 'bg-cyan-950/60 border-cyan-500/50 text-cyan-300 shadow-sm'
+                            : booking.smartAutoExtendEnabled !== false
+                            ? 'bg-slate-950/50 border-slate-800 text-slate-400'
+                            : 'bg-slate-950/30 border-slate-850 text-slate-600 opacity-60'
+                        }`}
+                      >
+                        <div className="text-[9px] font-semibold uppercase tracking-wider text-slate-400">Block #{blockNum}</div>
+                        <div className="font-bold text-[11px] leading-tight text-white mt-0.5">+30m</div>
+                        <div className="text-[8px] mt-0.5 font-medium">
+                          {isUsed ? (
+                            <span className="text-emerald-400 font-bold flex items-center justify-center gap-0.5">
+                              <Check size={9} /> Applied
+                            </span>
+                          ) : (
+                            <span className="text-slate-500">Available</span>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+
+                  {/* Overstay Penalty Block */}
+                  <div
+                    className={`rounded-lg p-1.5 border transition-all ${
+                      booking.penaltyApplied
+                        ? 'bg-red-950/70 border-red-500/60 text-red-200 animate-pulse shadow-sm'
+                        : (booking.autoExtensionCount || 0) >= 3
+                        ? 'bg-amber-950/60 border-amber-500/50 text-amber-300'
+                        : 'bg-slate-950/50 border-slate-800 text-slate-400'
+                    }`}
+                  >
+                    <div className="text-[9px] font-semibold uppercase tracking-wider text-slate-400">Penalty</div>
+                    <div className="font-bold text-[11px] leading-tight text-amber-300 mt-0.5">₹50</div>
+                    <div className="text-[8px] mt-0.5 font-medium">
+                      {booking.penaltyApplied ? (
+                        <span className="text-red-400 font-bold">Charged</span>
+                      ) : (
+                        <span className="text-slate-500">After 3x</span>
+                      )}
+                    </div>
+                  </div>
+                </div>
+
+                {/* Active Extension Notification Box */}
+                {(booking.autoExtensionCount || 0) > 0 && (
+                  <div className="bg-gradient-to-r from-cyan-950/60 to-blue-950/50 border border-cyan-500/40 rounded-lg p-2.5 text-[10px] text-cyan-200 flex items-start justify-between gap-2 shadow-sm animate-in fade-in">
+                    <div className="flex items-start gap-1.5">
+                      <CheckCircle2 size={14} className="text-emerald-400 shrink-0 mt-0.5" />
+                      <div>
+                        <span className="font-bold text-emerald-300">
+                          Extension #{booking.autoExtensionCount} of {booking.maxAutoExtensions || 3} Active:
+                        </span>{' '}
+                        <span>
+                          30-minute buffer automatically added. Valid until{' '}
+                          <span className="font-mono font-bold text-white">
+                            {booking.scheduledEndTime
+                              ? new Date(booking.scheduledEndTime).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+                              : 'extended time'}
+                          </span>. Zero punitive penalties applied.
+                        </span>
+                      </div>
+                    </div>
+                    {onResetAutoExtensions && (
+                      <button
+                        onClick={() => onResetAutoExtensions(booking.id)}
+                        className="text-[9px] text-cyan-400 hover:text-cyan-200 underline font-semibold shrink-0"
+                        title="Reset extension counter for testing"
+                      >
+                        Reset (0/3)
+                      </button>
+                    )}
+                  </div>
+                )}
+
+                {/* Penalty Warning if 3 extensions used */}
+                {(booking.autoExtensionCount || 0) >= 3 && (
+                  <div className="bg-amber-950/50 border border-amber-500/40 rounded-lg p-2 text-[10px] text-amber-200 flex items-start gap-1.5">
+                    <AlertTriangle size={13} className="text-amber-400 shrink-0 mt-0.5" />
+                    <div>
+                      <span className="font-bold text-amber-300">{t.penaltyWarning}</span>
+                      {booking.penaltyApplied && (
+                        <span className="block text-red-300 font-bold mt-0.5">
+                          ₹{booking.penaltyAmount || 50} overstay penalty has been applied.
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* 1-Tap Quick Extend Buttons */}
+            <div className="space-y-1.5 pt-1">
+              <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">
+                {t.extendNow}:
+              </span>
+              <div className="grid grid-cols-3 gap-2">
+                <button
+                  onClick={() => {
+                    soundEffects.playBookingSuccess();
+                    onExtendBooking?.(booking.id, 30);
+                  }}
+                  className="p-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-cyan-400 border border-slate-700 font-semibold text-[11px] transition text-center hover:border-cyan-500 shadow-sm"
+                >
+                  {t.quickExtend30}
+                </button>
+                <button
+                  onClick={() => {
+                    soundEffects.playBookingSuccess();
+                    onExtendBooking?.(booking.id, 60);
+                  }}
+                  className="p-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-emerald-400 border border-slate-700 font-semibold text-[11px] transition text-center hover:border-emerald-500 shadow-sm"
+                >
+                  {t.quickExtend60}
+                </button>
+                <button
+                  onClick={() => {
+                    soundEffects.playBookingSuccess();
+                    onExtendBooking?.(booking.id, 120);
+                  }}
+                  className="p-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-purple-400 border border-slate-700 font-semibold text-[11px] transition text-center hover:border-purple-500 shadow-sm"
+                >
+                  {t.quickExtend120}
+                </button>
+              </div>
+            </div>
+
+            {/* Simulation Trigger to test Overstay Resolution & Smart Auto-Extend */}
+            <button
+              onClick={() => {
+                soundEffects.playDoubleBookingAlert();
+                onSimulateOverstay?.(booking.id);
+              }}
+              className="w-full py-2 px-3 rounded-lg bg-amber-950/40 hover:bg-amber-900/60 border border-amber-500/30 text-amber-300 font-medium text-[11px] transition flex items-center justify-center gap-1.5 shadow-sm"
+              title={t.simulateOverstayDesc}
+            >
+              <Radio size={13} className="text-amber-400 animate-pulse shrink-0" />
+              <span>
+                {booking.smartAutoExtendEnabled !== false
+                  ? `${t.simulateOverstay} (Test Auto-Extend +30m)`
+                  : t.simulateOverstay}
+              </span>
+            </button>
           </div>
 
           {/* Visual QR Code Container with Click-to-Scan Gate Sensor Overlay Trigger */}

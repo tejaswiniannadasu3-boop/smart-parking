@@ -13,6 +13,8 @@ export interface VoiceCommandResult {
     | 'CHECK_OCCUPANCY'
     | 'NAVIGATE'
     | 'CANCEL_BOOKING'
+    | 'SHOW_MALLS'
+    | 'TOGGLE_AUTO_EXTEND'
     | 'HELP'
     | 'UNKNOWN';
   param?: string;
@@ -222,6 +224,33 @@ class SpeechAssistantService {
         action: 'TOGGLE_THEME',
         transcript: rawText,
         feedback: 'Updating visual interface color theme.',
+      };
+    }
+
+    if (
+      text.includes('mall') ||
+      text.includes('malls') ||
+      text.includes('india') ||
+      text.includes('switch mall') ||
+      text.includes('directory')
+    ) {
+      return {
+        action: 'SHOW_MALLS',
+        transcript: rawText,
+        feedback: 'Opening All Malls in India directory. You can explore and switch shopping hubs.',
+      };
+    }
+
+    if (
+      text.includes('auto extend') ||
+      text.includes('auto-extend') ||
+      text.includes('smart extend') ||
+      text.includes('automatic extend')
+    ) {
+      return {
+        action: 'TOGGLE_AUTO_EXTEND',
+        transcript: rawText,
+        feedback: 'Toggling Smart Auto-Extend for your parking booking.',
       };
     }
 
